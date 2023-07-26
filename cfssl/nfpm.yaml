@@ -1,0 +1,25 @@
+# yaml-language-server: $schema=https://nfpm.goreleaser.com/static/schema.json
+---
+name: tedge-pki-cfssl
+arch: all
+platform: linux
+version: ${SEMVER}
+section: misc
+priority: optional
+maintainer: community <community@thin-edge.io>
+description: thin-edge.io cfssl pki extension. cfssl is a pki tool provided by Cloudflare.
+vendor: thin-edge.io
+homepage: https://github.com/thin-edge/tedge-pki
+license: Apache License 2.0
+apk:
+  # Use noarch instead of "all"
+  arch: noarch
+depends:
+  - curl
+  - openssl
+  - jq
+contents:
+  - src: ./cfssl/pki-cfssl
+    dst: /usr/bin/
+    file_info:
+      mode: 0755

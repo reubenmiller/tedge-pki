@@ -1,0 +1,16 @@
+{
+    "hosts": [
+        "community@thin-edge.io",
+        "127.0.0.1"
+    ],
+    "key": {
+        "algo": "ECDSA-256",
+        "size": 2048
+    },
+    "names": [
+        {
+            "O":  "Thin Edge",
+            "OU": "CustomPKI"
+        }
+    ]
+}

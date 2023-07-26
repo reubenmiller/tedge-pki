@@ -1,0 +1,338 @@
+#!/bin/sh
+set -e
+help() {
+    echo "
+cfssl PKI client tool for creating, signing and showing device certificates for thin-edge.io
+It utilizes the [cfssl](https://github.com/cloudflare/cfssl) tool which supports a local PKI to
+generate and sign certificates using API endpoints.
+
+Dependencies:
+    * cfssl endpoint (must be reachable)
+    * jq
+    * curl
+    * openssl (currently only used to change private key format from PKCS1 (EC) to PKCS8). See https://github.com/cloudflare/cfssl/issues/848
+
+Usage
+    $0 new [common_name]
+
+    $0 sign [csr_file]
+
+    $0 show [public_cert_file]
+
+    $0 delete
+
+Flag:
+    --basedir|-d <dir>         Base directory where all of the certificates should be/are stored
+                               Default: /etc/tedge/device-certificates
+    --host <pki_host>          cfssl endpoint, e.g. localhost:8888
+    --device-id <name>         Device id to be used in the Certificates Common Name field
+    --force                    Force creation of certificates even if certs already exist
+    --debug                    Enable debug logging
+    --help|-h                  Show help
+
+Examples
+    $0 new testdevice001
+    \$ Create a new cert key pair with the common name 'tedgedevice001'
+
+    $0 new
+    \$ Create a new cert key pair using an auto generated name (based on hostname)
+
+    $0 sign
+    \$ Send signing request using the default csr file
+
+    $0 sign cert.csr
+    \$ Send signing request using an existing csr file
+
+    $0 show
+    \$ Show the current device certificate
+
+    $0 delete
+    \$ Remove all certificates (if they exist)
+"
+}
+#
+# TODO: use mtls for authentication endpoint to only accept clients with the trust anchor
+#
+log () { echo "$*" >&2; }
+
+#
+# References: https://github.com/cloudflare/cfssl/tree/master/doc/api
+#
+export CFSSL_HOST="${CFSSL_HOST:-"127.0.0.1:8888"}"
+
+DEVICE_ID=${DEVICE_ID:-}
+DEFAULT_BASEDIR="/etc/tedge/device-certs"
+BASEDIR="${BASEDIR:-}"
+FORCE="${FORCE:-}"
+DEVICE_CERT="${DEVICE_CERT:-}"
+DEVICE_KEY="${DEVICE_KEY:-}"
+DEVICE_CSR="${DEVICE_CSR:-}"
+TMP_CERT="${TMP_CERT:-}"
+TMP_KEY="${TMP_KEY:-}"
+CA_CERT="${CA_CERT:-}"
+DEBUG="${DEBUG:-}"
+CONFIG_FILE="${CONFIG_FILE:-/etc/tedge-pki/conf.d/cfssl}"
+
+if [ -f "$CONFIG_FILE" ]; then
+    log "Loading settings from file: $CONFIG_FILE"
+    # shellcheck disable=SC1090
+    . "$CONFIG_FILE"
+fi
+
+POSITIONAL_ARGS=""
+
+while [ $# -gt 0 ]
+do
+    case "$1" in
+        # Base directory where all certificate files should be kept
+        --basedir|-d)
+            BASEDIR="$2"
+            shift
+            ;;
+        # Device id used when creating a certificate
+        --device-id)
+            DEVICE_ID="$2"
+            shift
+            ;;
+        # PKI host
+        --host)
+            CFSSL_HOST="$2"
+            shift
+            ;;
+        # Force creation of certificates even if certs already exist
+        --force|-f)
+            FORCE="1"
+            ;;
+        # Debug
+        --debug)
+            DEBUG="1"
+            ;;
+        --help|-h)
+            help
+            exit 0
+            ;;
+        --*|-*)
+            log "WARN: Unknown option: $1"
+            exit 1
+            ;;
+        *)
+            if [ -n "$POSITIONAL_ARGS" ]; then
+                POSITIONAL_ARGS="$POSITIONAL_ARGS $1"
+            else
+                POSITIONAL_ARGS="$1"
+            fi
+            ;;
+    esac
+    shift
+done
+
+if [ -n "$POSITIONAL_ARGS" ]; then
+    # posix shell does not support arrays, so the args should not be wrapped in double quotes
+    # shellcheck disable=SC2086
+    set -- $POSITIONAL_ARGS
+fi
+
+#
+# Check dependencies
+#
+check_dependency() {
+    tool="$1"
+    if ! command -V "$tool" >/dev/null 2>&1; then
+        log "ERROR: Missing required dependency: $tool"
+        exit 1
+    fi
+}
+
+check_dependency "jq"
+check_dependency "curl"
+check_dependency "openssl"
+
+#
+# Settings
+#
+if [ $# -eq 0 ]; then
+    log "ERROR: Missing required positional argument"
+    help
+    exit 1
+fi
+COMMAND="$1"
+shift
+
+if [ -z "$BASEDIR" ]; then
+    if [ -d "$DEFAULT_BASEDIR" ]; then
+        BASEDIR="$DEFAULT_BASEDIR"
+    else
+        # default to current directory
+        BASEDIR="."
+    fi
+fi
+
+if [ -z "$DEVICE_CERT" ]; then
+    DEVICE_CERT="$BASEDIR/tedge-certificate.pem"
+fi
+if [ -z "$DEVICE_KEY" ]; then
+    DEVICE_KEY="$BASEDIR/tedge-private-key.pem"
+fi
+if [ -z "$DEVICE_CSR" ]; then
+    DEVICE_CSR="$BASEDIR/cert.csr"
+fi
+if [ -z "$TMP_CERT" ]; then
+    TMP_CERT="$BASEDIR/cert.tmp"
+fi
+if [ -z "$TMP_KEY" ]; then
+    TMP_KEY="$BASEDIR/cert-key.tmp"
+fi
+if [ -z "$CA_CERT" ]; then
+    CA_CERT="$BASEDIR/ca.pem"
+fi
+
+#
+# Functions
+#
+
+get_ca_cert() {
+    curl -d '{"label": "primary"}' "${CFSSL_HOST}/api/v1/cfssl/info" \
+    | jq -r '.result.certificate'
+}
+
+sign() {
+    # Send a csr with. This is not required if new_cert is used (as new_cert creates and signs a cert)
+    csr="$1"
+    log "Sending signing request: $csr"
+
+    csr_contents=$(sed ':a;N;$!ba;s/\n/\\n/g' "$csr")
+    # Alternative to replace the literal newline with escaped newline
+    # csr_contents=$(sed 's/$/\\n/g' "$csr" | tr -d '\n')
+
+    body=$(printf '{"certificate_request": "%s"}' "$csr_contents")
+    response=$(curl -d "$body" "${CFSSL_HOST}/api/v1/cfssl/sign")
+    printf '%s' "$response" | jq -r '.result.certificate' > "$TMP_CERT"
+    build_public_cert "$TMP_CERT" "$DEVICE_CERT"
+
+    log "Created public certiifcate:  $DEVICE_CERT"
+}
+
+new_cert() {
+    # Generate a completely new key and cert
+    cn="${1:-$DEVICE_ID}"
+    if [ $# -ge 1 ]; then
+        cn="$1"
+    fi
+    if [ -z "$cn" ]; then
+        if command -V hostname >/dev/null 2>&1; then
+            cn="te_$(hostname)"
+        fi
+    fi
+
+    # TODO: Add option to force recreation of cert even if certs already exist
+    if [ "$FORCE" != "1" ]; then
+        if [ -f "$DEVICE_CERT" ]; then
+            log "INFO: Device (public) certificate already exists: $DEVICE_CERT"
+            exit 0
+        fi
+        if [ -f "$DEVICE_KEY" ]; then
+            log "INFO: Device (private) certificate already exists: $DEVICE_KEY"
+            exit 0
+        fi
+    else
+        delete_certs
+    fi
+
+    log "Creating new certificate: cn=$cn"
+
+    body=$(printf '{ "request": {"hosts":[], "names":[{"C":"DE", "O":"Thin Edge", "OU":"Test Device"}], "CN": "%s", "key": {"algo": "rsa","size": 2048}} }' "$cn")
+    # curl -d "$body" "${CFSSL_HOST}/api/v1/cfssl/newcert" | cfssljson
+
+    response=$(curl -d "$body" "${CFSSL_HOST}/api/v1/cfssl/newcert")
+
+    if [ "$DEBUG" = 1 ]; then
+        log "---DEBUG---"
+        printf '%s' "$response" >&2
+        log "---END DEBUG---"
+    fi
+
+    printf '%s' "$response" | jq -r '.result.private_key' > "$TMP_KEY"
+    printf '%s' "$response" | jq -r '.result.certificate_request' > "$DEVICE_CSR"
+    printf '%s' "$response" | jq -r '.result.certificate' > "$TMP_CERT"
+
+    # Convert key to PKCS8 (e.g. BEGIN PRIVATE KEY)
+    # Required as cfssl does not support generating keys in pkcs8 format
+    # https://github.com/cloudflare/cfssl/issues/848
+    # Alternatively, just the signing could be used instead
+    openssl pkcs8 -topk8 -nocrypt -in "$TMP_KEY" -out "$DEVICE_KEY"
+
+    build_public_cert "$TMP_CERT" "$DEVICE_CERT"
+
+    log "Created private certificate: $DEVICE_KEY"
+    log "Created public certificate:  $DEVICE_CERT"
+}
+
+build_public_cert() {
+    in_cert="$1"
+    out_public_cert="$2"
+
+    # Get server pem (as the full cert chain is needed in the device-cert)
+    if [ ! -f "$CA_CERT" ]; then
+        get_ca_cert > "$CA_CERT"
+    fi
+
+    # Create public cert chain
+    mv "$in_cert" "$out_public_cert"
+    if [ -f "$CA_CERT" ]; then
+        cat "$CA_CERT" >> "$out_public_cert"
+    fi
+
+    show_cert "$out_public_cert"
+}
+
+show_cert() {
+    cert="$1"
+    if [ ! -f "$cert" ]; then
+        log "ERROR: Certificate does not exist. file=$cert" >&2
+        exit 1
+    fi
+    if command -V openssl >/dev/null 2>&1; then
+        openssl x509 -in "$cert" -text -noout
+    fi
+}
+
+delete_certs() {
+    log "Removing all certificates (public, private, csr, ca cert etc.)"
+    rm -f "$DEVICE_CERT"
+    rm -f "$DEVICE_KEY"
+    rm -f "$DEVICE_CSR"
+    rm -f "$TMP_CERT"
+    rm -f "$CA_CERT"
+}
+
+# ----------------------------
+# Main
+# ----------------------------
+log "command: '$COMMAND'"
+case "$COMMAND" in
+    new)
+        new_cert "$@"
+        ;;
+    sign)
+        file="$DEVICE_CSR"
+        if [ $# -ge 1 ]; then
+            file="$1"
+        fi
+        sign "$file"
+        ;;
+    show)
+        file="$DEVICE_CERT"
+        if [ $# -ge 1 ]; then
+            file="$1"
+        fi
+        show_cert "$file"
+        ;;
+    delete)
+        delete_certs
+        ;;
+    *)
+        log "ERROR: Unknown command"
+        help
+        exit 1
+        ;;
+esac
