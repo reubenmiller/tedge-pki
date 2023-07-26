@@ -31,7 +31,7 @@ The server and client have the following dependencies.
 
 2. Upload the CA certificate to Cumulocity IoT (if you have not already done so)
 
-    Using go-c8y-cli, you can upload the `ca.pem` certificate to Cumulocity IoT.
+    Using [go-c8y-cli](https://goc8ycli.netlify.app/), you can upload the `ca.pem` certificate to Cumulocity IoT.
 
     ```sh
     c8y devicemanagement certificates create \
