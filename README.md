@@ -65,3 +65,56 @@ The server and client have the following dependencies.
     -rw-r--r--  1 cdundee  staff  2446 Jul 26 17:04 tedge-certificate.pem
     -rw-r--r--  1 cdundee  staff  1704 Jul 26 17:04 tedge-private-key.pem
     ```
+
+### openssl
+
+Create device certificates using a local CA which is on the same device that the certificates are being created on.
+
+**Pre-requisites**
+
+**Client**
+
+* openssl
+
+1. Generate the root CA certificate
+
+    ```sh
+    ./openssl/pki-openssl ca
+    ```
+
+2. Upload the CA certificate to Cumulocity IoT (if you have not already done so)
+
+    Using [go-c8y-cli](https://goc8ycli.netlify.app/), you can upload the `ca.pem` certificate to Cumulocity IoT.
+
+    ```sh
+    c8y devicemanagement certificates create \
+        --autoRegistrationEnabled \
+        --file ./ca.pem \
+        --name "Local thin-edge.io CA" \
+        --status ENABLED
+    ```
+
+    Alternatively, you can manually upload the `ca.pem` file using the Cumulocity IoT Device Management application under `Trusted Certificates`.
+
+    **Note**
+
+    * Uploading a trusted certificate requires the `ROLE_TENANT_MANAGEMENT_ADMIN` or `ROLE_TENANT_ADMIN` permissions.
+
+3. Run the client pki script to generate new cert pair (public and private key)
+
+    ```sh
+    ./openssl/pki-openssl new mycustomname
+    ```
+
+    Inspect the output files
+
+    ```sh
+    ls -l *.csr tedge*
+    ```
+
+    *Output*
+
+    ```sh
+    -rw-r--r--  1 cdundee  staff  2446 Jul 26 17:04 tedge-certificate.pem
+    -rw-r--r--  1 cdundee  staff  1704 Jul 26 17:04 tedge-private-key.pem
+    ```

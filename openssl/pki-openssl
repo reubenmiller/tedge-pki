@@ -21,6 +21,8 @@ Dependencies:
     * openssl
 
 Usage
+    $0 ca
+
     $0 new [common_name]
 
     $0 sign [csr_file]
@@ -40,6 +42,9 @@ Flag:
     --help|-h                  Show help
 
 Examples
+    $0 ca
+    \$ Create a root CA if it does not already exist
+
     $0 new testdevice001
     \$ Create a new cert key pair with the common name 'tedgedevice001'
 
@@ -314,7 +319,32 @@ check_ca() {
 
 gen_ca() {
     info "[gen_ca]: Generating CA cert is currently not supported"
-    exit 1
+
+    if [ ! -f "$CA_KEY" ]; then
+        if [ -n "$CA_KEY_BASE64" ]; then
+            info "[load_ca] loading root ca key from env"
+            echo "$CA_KEY_BASE64" | base64 -d > "$CA_KEY"
+        else
+            info "[load_ca] creating new root ca key"
+            openssl genrsa -out "$CA_KEY" 4096 >/dev/null
+        fi
+    fi
+
+    if [ -n "$CA_CERT_BASE64" ]; then
+        info "[load_ca] loading root ca certificate from env"
+        echo "$CA_CERT_BASE64" | base64 -d > "$CA_CERT"
+    else
+        info "[load_ca] creating new root ca certificate"
+
+        openssl req -x509 \
+            -new \
+            -nodes \
+            -subj "/O=Thin Edge/OU=Device Signer" \
+            -key "$CA_KEY" \
+            -sha256 \
+            -days 1024 \
+            -out "$CA_CERT"
+    fi
 }
 
 sign() {
@@ -346,18 +376,7 @@ commit() {
 }
 
 load_ca() {
-    # Check if a local cert is provided via env variables
-    if [ ! -f "$$CA_KEY" ]; then
-        if [ -n "$CA_KEY_BASE64" ]; then
-            echo "$CA_KEY_BASE64" | base64 -d > "$CA_KEY"
-        fi
-    fi
-
-    if [ ! -f "$$CA_CERT" ]; then
-        if [ -n "$CA_CERT_BASE64" ]; then
-            echo "$CA_CERT_BASE64" | base64 -d > "$CA_CERT"
-        fi
-    fi
+    check_ca || gen_ca
 }
 
 new_cert() {
@@ -404,6 +423,9 @@ delete_certs() {
 # ----------------------------
 # log "command: '$COMMAND'"
 case "$COMMAND" in
+    ca)
+        load_ca
+        ;;
     new)
         load_ca
         new_cert "$@"
