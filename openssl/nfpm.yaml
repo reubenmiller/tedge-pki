@@ -1,0 +1,23 @@
+# yaml-language-server: $schema=https://nfpm.goreleaser.com/static/schema.json
+---
+name: tedge-pki-openssl
+arch: all
+platform: linux
+version: ${SEMVER}
+section: misc
+priority: optional
+maintainer: community <community@thin-edge.io>
+description: thin-edge.io openssl pki extension. Only supports a local CA
+vendor: thin-edge.io
+homepage: https://github.com/thin-edge/tedge-pki
+license: Apache License 2.0
+apk:
+  # Use noarch instead of "all"
+  arch: noarch
+depends:
+  - openssl
+contents:
+  - src: ./openssl/pki-openssl
+    dst: /usr/bin/
+    file_info:
+      mode: 0755

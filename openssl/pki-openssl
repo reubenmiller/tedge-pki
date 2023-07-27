@@ -1,0 +1,434 @@
+#!/bin/sh
+set -e
+help() {
+    echo "
+openssl signing tool for creating, signing and showing device certificates for thin-edge.io
+
+It uses openssl along with a local CA to sign new device certificates.
+
+The CA files (public cert and private key) can be either provided by arguments, or the files
+can be provided by setting the following environment variables with the base64 encoded file:
+
+* CA_CERT_BASE64
+* CA_KEY_BASE64
+
+An example showing how to set the above environment variables is shown below:
+
+export CA_KEY_BASE64=$(cat ca.key | base64)
+export CA_CERT_BASE64=$(cat ca.pem | base64)
+
+Dependencies:
+    * openssl
+
+Usage
+    $0 new [common_name]
+
+    $0 sign [csr_file]
+
+    $0 show [public_cert_file]
+
+    $0 delete
+
+Flag:
+    --basedir|-d <dir>         Base directory where all of the certificates should be/are stored
+                               Default: /etc/tedge/device-certificates
+    --ca <cert>                Public CA certificate
+    --ca-key <cert>            Private CA certificate
+    --device-id <name>         Device id to be used in the Certificates Common Name field
+    --force                    Force creation of certificates even if certs already exist
+    --debug                    Enable debug logging
+    --help|-h                  Show help
+
+Examples
+    $0 new testdevice001
+    \$ Create a new cert key pair with the common name 'tedgedevice001'
+
+    $0 new
+    \$ Create a new cert key pair using an auto generated name (based on hostname)
+
+    $0 sign
+    \$ Send signing request using the default csr file
+
+    $0 sign cert.csr
+    \$ Send signing request using an existing csr file
+
+    $0 show
+    \$ Show the current device certificate
+
+    $0 delete
+    \$ Remove all certificates (if they exist)
+"
+}
+#
+# TODO: use mtls for authentication endpoint to only accept clients with the trust anchor
+#
+log () { echo "$*" >&2; }
+fail () { echo "ERROR $*" >&2; exit 1; }
+warning () { echo "WARN  $*" >&2; }
+info () { echo "INFO  $*" >&2; }
+
+#
+# References: https://github.com/cloudflare/cfssl/tree/master/doc/api
+#
+export CFSSL_HOST="${CFSSL_HOST:-"127.0.0.1:8888"}"
+
+DEVICE_ID=${DEVICE_ID:-}
+DEFAULT_BASEDIR="/etc/tedge/device-certs"
+BASEDIR="${BASEDIR:-}"
+FORCE="${FORCE:-}"
+DEVICE_CERT="${DEVICE_CERT:-}"
+DEVICE_KEY="${DEVICE_KEY:-}"
+DEVICE_CSR="${DEVICE_CSR:-}"
+TMP_CERT="${TMP_CERT:-}"
+CA_CERT="${CA_CERT:-}"
+CA_KEY="${CA_KEY:-}"
+DEBUG="${DEBUG:-}"
+CONFIG_FILE="${CONFIG_FILE:-/etc/tedge-pki/conf.d/cfssl}"
+CERT_DURATION_SEC="${CERT_DURATION_SEC:-86400}"
+
+# Check if cert will expire in next 12 hours (in seconds)
+WILL_EXPIRE_IN=${WILL_EXPIRE_IN:-43200}
+
+if [ -f "$CONFIG_FILE" ]; then
+    log "Loading settings from file: $CONFIG_FILE"
+    # shellcheck disable=SC1090
+    . "$CONFIG_FILE"
+fi
+
+POSITIONAL_ARGS=""
+
+while [ $# -gt 0 ]
+do
+    case "$1" in
+        # Base directory where all certificate files should be kept
+        --basedir|-d)
+            BASEDIR="$2"
+            shift
+            ;;
+        # Device id used when creating a certificate
+        --device-id)
+            DEVICE_ID="$2"
+            shift
+            ;;
+        # CA public certificate
+        --ca)
+            CA_CERT="$2"
+            shift
+            ;;
+        # CA private certificate
+        --ca-key)
+            CA_KEY="$2"
+            shift
+            ;;
+        # Minimum seconds the device certificate should be valid for
+        --valid-for)
+            WILL_EXPIRE_IN="$2"
+            shift
+            ;;
+
+        # Certificate request duration in seconds
+        --req-duration)
+            CERT_DURATION_SEC="$2"
+            shift
+            ;;
+        
+        # Force creation of certificates even if certs already exist
+        --force|-f)
+            FORCE="1"
+            ;;
+        # Debug
+        --debug)
+            DEBUG="1"
+            ;;
+        --help|-h)
+            help
+            exit 0
+            ;;
+        --*|-*)
+            log "WARN: Unknown option: $1"
+            exit 1
+            ;;
+        *)
+            if [ -n "$POSITIONAL_ARGS" ]; then
+                POSITIONAL_ARGS="$POSITIONAL_ARGS $1"
+            else
+                POSITIONAL_ARGS="$1"
+            fi
+            ;;
+    esac
+    shift
+done
+
+if [ -n "$POSITIONAL_ARGS" ]; then
+    # posix shell does not support arrays, so the args should not be wrapped in double quotes
+    # shellcheck disable=SC2086
+    set -- $POSITIONAL_ARGS
+fi
+
+#
+# Check dependencies
+#
+check_dependency() {
+    tool="$1"
+    if ! command -V "$tool" >/dev/null 2>&1; then
+        log "ERROR: Missing required dependency: $tool"
+        exit 1
+    fi
+}
+
+check_dependency "openssl"
+
+#
+# Settings
+#
+if [ $# -eq 0 ]; then
+    log "ERROR: Missing required positional argument"
+    help
+    exit 1
+fi
+COMMAND="$1"
+shift
+
+if [ -z "$BASEDIR" ]; then
+    if [ -d "$DEFAULT_BASEDIR" ]; then
+        BASEDIR="$DEFAULT_BASEDIR"
+    else
+        # default to current directory
+        BASEDIR="."
+    fi
+fi
+
+if [ -z "$DEVICE_CERT" ]; then
+    DEVICE_CERT="$BASEDIR/tedge-certificate.pem"
+fi
+if [ -z "$DEVICE_KEY" ]; then
+    DEVICE_KEY="$BASEDIR/tedge-private-key.pem"
+fi
+if [ -z "$DEVICE_CSR" ]; then
+    DEVICE_CSR="$BASEDIR/cert.csr"
+fi
+if [ -z "$TMP_CERT" ]; then
+    TMP_CERT="$BASEDIR/cert.tmp"
+fi
+if [ -z "$CA_CERT" ]; then
+    CA_CERT="$BASEDIR/ca.pem"
+fi
+if [ -z "$CA_KEY" ]; then
+    CA_KEY="$BASEDIR/ca.key"
+fi
+
+#
+# Functions
+#
+
+check_cert() {
+    key="$1"
+    cert="$2"
+    min_expire_sec="$3"
+
+    # key
+    if [ ! -f "$key" ]; then
+        info "[check_cert] file not found. key=$key"
+        return 1
+    fi
+    
+    # cert
+    if [ ! -f "$cert" ]; then
+        info "[check_cert] file not found. cert=$cert"
+        return 1
+    fi
+
+    # key/pair do not match
+    key_sum=$(openssl pkey -in "$key" -pubout | md5sum)
+    cert_sum=$(openssl x509 -in "$cert" -pubkey | grep "END PUBLIC KEY" -B 100 | md5sum)
+    if [ "$key_sum" != "$cert_sum" ]; then
+        info "[check_cert] key/pair do not match. Marking cert as invalid. key=$key, cert=$cert"
+        mv "$cert" "$cert.invalid"
+        return 1
+    fi
+
+    # Will expire soon
+    if [ -n "$min_expire_sec" ]; then
+        if ! openssl x509 -enddate -noout -in "$cert" -checkend "$min_expire_sec" >/dev/null; then
+            info "[check_cert] will expire within $min_expire_sec seconds"
+            return 1
+        fi
+    fi
+    return 0
+}
+
+check_key() {
+    if [ ! -f "$DEVICE_KEY" ]; then
+        info "[check_key] file not found. file=$DEVICE_KEY"
+        return 1
+    fi
+
+    if ! openssl pkey -in "$DEVICE_KEY" -pubout >/dev/null 2>&1; then
+        info "[check_key] invalid format"
+        return 1
+    fi
+}
+
+gen_key() {
+    # key_sum=$(openssl pkey -in "$DEVICE_KEY" -pubout | md5sum)
+    # openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out genpkey.key
+
+    if ! openssl pkey -in "$DEVICE_KEY" -pubout >/dev/null 2>&1; then
+        info "[gen_key] creating private key"
+        openssl genpkey -algorithm EC \
+            -pkeyopt ec_paramgen_curve:P-256 \
+            -pkeyopt ec_param_enc:named_curve -out "$DEVICE_KEY"
+    fi
+}
+
+check_csr() {
+    if [ ! -f "$DEVICE_CSR" ]; then
+        info "[check_csr] file not found. file=$DEVICE_CSR"
+        return 1
+    fi
+
+    if ! openssl req -in "$DEVICE_CSR" -text -noout -verify >/dev/null; then
+        info "[check_csr] invalid format"
+        return 1
+    fi
+}
+
+gen_csr() {
+    info "[gen_csr] create csr. CN=$DEVICE_ID"
+    openssl req -new -sha256 \
+        -key "$DEVICE_KEY" \
+        -subj "/CN=${DEVICE_ID}/O=Thin Edge/OU=Test Device" \
+        -out "$DEVICE_CSR" >/dev/null
+}
+
+check_ca() {
+    if [ ! -f "$CA_CERT" ]; then
+        info "[check_ca] file not found. file=$CA_CERT"
+        return 1
+    fi
+    if [ ! -f "$CA_KEY" ]; then
+        info "[check_ca] file not found. file=$CA_KEY"
+        return 1
+    fi
+}
+
+gen_ca() {
+    info "[gen_ca]: Generating CA cert is currently not supported"
+    exit 1
+}
+
+sign() {
+    csr="$1"
+    info "[sign] signing request. file=$csr"
+    
+    days=$((CERT_DURATION_SEC / 86400))
+    if [ "$days" -le 0 ]; then
+        days=1
+    fi
+
+    openssl x509 -req \
+        -days "$days" \
+        -in "$csr" \
+        -CAcreateserial \
+        -CA "$CA_CERT" \
+        -CAkey "$CA_KEY" \
+        -out "$TMP_CERT" \
+        -sha256 >/dev/null 2>&1
+
+    info "[sign] appending ca cert. ca=$CA_CERT, tmp_cert=$TMP_CERT"
+    cat "$CA_CERT" >> "$TMP_CERT"
+}
+
+commit() {
+    info "[commit] writing new certificate. file=$DEVICE_CERT"
+    mv "$TMP_CERT" "$DEVICE_CERT"
+    info "[commit] successful"
+}
+
+load_ca() {
+    # Check if a local cert is provided via env variables
+    if [ ! -f "$$CA_KEY" ]; then
+        if [ -n "$CA_KEY_BASE64" ]; then
+            echo "$CA_KEY_BASE64" | base64 -d > "$CA_KEY"
+        fi
+    fi
+
+    if [ ! -f "$$CA_CERT" ]; then
+        if [ -n "$CA_CERT_BASE64" ]; then
+            echo "$CA_CERT_BASE64" | base64 -d > "$CA_CERT"
+        fi
+    fi
+}
+
+new_cert() {
+    if [ $# -ge 1 ]; then
+        DEVICE_ID="$1"
+    fi
+    if [ -z "$DEVICE_ID" ]; then
+        if command -V hostname >/dev/null 2>&1; then
+            DEVICE_ID="te_$(hostname)"
+        fi
+    fi
+
+    if check_cert "$DEVICE_KEY" "$DEVICE_CERT" "$WILL_EXPIRE_IN"; then
+        info "Certificate is already valid. key=$DEVICE_KEY, cert=$DEVICE_CERT"
+        return
+    fi
+
+    check_key || gen_key
+    check_csr || gen_csr
+    sign "$DEVICE_CSR"
+
+    # Validate before replacing the cert
+    if ! check_cert "$DEVICE_KEY" "$TMP_CERT" "$WILL_EXPIRE_IN"; then
+        info "[new_cert] Generated certificate is not valid"
+        return 1
+    fi
+    commit
+}
+
+show_cert() {
+    openssl x509 -in "$1" -text -noout
+}
+
+delete_certs() {
+    log "Removing all certificates (public, private, csr)"
+    rm -f "$DEVICE_CERT"
+    rm -f "$DEVICE_KEY"
+    rm -f "$DEVICE_CSR"
+    rm -f "$TMP_CERT"
+}
+
+# ----------------------------
+# Main
+# ----------------------------
+# log "command: '$COMMAND'"
+case "$COMMAND" in
+    new)
+        load_ca
+        new_cert "$@"
+        ;;
+    sign)
+        file="$DEVICE_CSR"
+        if [ $# -ge 1 ]; then
+            file="$1"
+        fi
+        load_ca
+        sign "$file"
+        ;;
+    show)
+        file="$DEVICE_CERT"
+        if [ $# -ge 1 ]; then
+            file="$1"
+        fi
+        show_cert "$file"
+        ;;
+    delete)
+        delete_certs
+        ;;
+    *)
+        log "ERROR: Unknown command"
+        help
+        exit 1
+        ;;
+esac
