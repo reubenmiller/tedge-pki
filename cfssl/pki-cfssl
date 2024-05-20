@@ -222,10 +222,19 @@ new_cert() {
     if [ $# -ge 1 ]; then
         cn="$1"
     fi
+
+    # If common name is empty try setting it from known places
+    if [ -z "$cn" ] && command -V tedge-identity >/dev/null 2>&1; then
+        cn=$(tedge-identity)
+    fi
+    if [ -z "$cn" ] && command -V hostname >/dev/null 2>&1; then
+        cn="te_$(hostname)"
+    fi
+
+    # check if it is still empty
     if [ -z "$cn" ]; then
-        if command -V hostname >/dev/null 2>&1; then
-            cn="te_$(hostname)"
-        fi
+        log "ERROR: Could not detect a sensible Common Name for the certificate"
+        exit 1
     fi
 
     # TODO: Add option to force recreation of cert even if certs already exist
