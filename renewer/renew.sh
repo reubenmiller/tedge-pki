@@ -1,4 +1,5 @@
 #!/bin/sh
+set -e
 
 #
 # Settings
@@ -45,6 +46,7 @@ renew() {
     if command -V tedge-cli >/dev/null 2>&1; then
         TEDGE="tedge-cli"
     fi
+    rm -f "/tmp/tedge.csr"
     "$TEDGE" cert create-csr --output-path "/tmp/tedge.csr"
     pki-cfssl sign "/tmp/tedge.csr"
 }
