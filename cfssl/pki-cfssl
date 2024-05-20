@@ -200,7 +200,11 @@ sign() {
     csr="$1"
     log "Sending signing request: $csr"
 
-    csr_contents=$(sed ':a;N;$!ba;s/\n/\\n/g' "$csr")
+    GSED="sed"
+    if command -V gsed >/dev/null 2>&1; then
+        GSED="gsed"
+    fi
+    csr_contents=$("$GSED" ':a;N;$!ba;s/\n/\\n/g' "$csr")
     # Alternative to replace the literal newline with escaped newline
     # csr_contents=$(sed 's/$/\\n/g' "$csr" | tr -d '\n')
 
@@ -218,10 +222,19 @@ new_cert() {
     if [ $# -ge 1 ]; then
         cn="$1"
     fi
+
+    # If common name is empty try setting it from known places
+    if [ -z "$cn" ] && command -V tedge-identity >/dev/null 2>&1; then
+        cn=$(tedge-identity)
+    fi
+    if [ -z "$cn" ] && command -V hostname >/dev/null 2>&1; then
+        cn="te_$(hostname)"
+    fi
+
+    # check if it is still empty
     if [ -z "$cn" ]; then
-        if command -V hostname >/dev/null 2>&1; then
-            cn="te_$(hostname)"
-        fi
+        log "ERROR: Could not detect a sensible Common Name for the certificate"
+        exit 1
     fi
 
     # TODO: Add option to force recreation of cert even if certs already exist

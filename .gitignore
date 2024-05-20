@@ -6,3 +6,4 @@ dist/
 .DS_Store
 *.srl
 *.key
+.env

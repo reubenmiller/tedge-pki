@@ -1,0 +1,23 @@
+version: "3"
+services:
+  pki:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      - CA_CERT_CONTENTS_KEY=${CA_CERT_CONTENTS_KEY:-}
+      - CA_CERT_CONTENTS_PUB=${CA_CERT_CONTENTS_PUB:-}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - 8888:8888
+    network_mode: host
+
+# Other containers
+# 
+# docker run -it --add-host "host.docker.internal:host-gateway" --rm debian:12-slim
+# Then inside the container use: curl host.docker.internal:8888/api/v1/cfssl/newcert
+
+# Or using docker compose
+# extra_hosts:
+#     - "host.docker.internal:host-gateway"
