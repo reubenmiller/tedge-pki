@@ -15,3 +15,7 @@ build:
 # Publish packages
 publish *args="":
     ./ci/publish.sh --path "{{package_dir}}" {{args}}
+
+# Start a cfssl server
+start-cfssl-server *ARGS:
+    docker compose --build -f cfssl/server/docker-compose.yaml up {{ARGS}}
