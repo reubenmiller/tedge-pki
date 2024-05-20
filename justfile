@@ -18,4 +18,4 @@ publish *args="":
 
 # Start a cfssl server
 start-cfssl-server *ARGS:
-    docker compose --build -f cfssl/server/docker-compose.yaml up {{ARGS}}
+    docker compose -f cfssl/server/docker-compose.yaml up --build {{ARGS}}
