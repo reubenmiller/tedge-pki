@@ -200,7 +200,11 @@ sign() {
     csr="$1"
     log "Sending signing request: $csr"
 
-    csr_contents=$(sed ':a;N;$!ba;s/\n/\\n/g' "$csr")
+    GSED="sed"
+    if command -V gsed >/dev/null 2>&1; then
+        GSED="gsed"
+    fi
+    csr_contents=$("$GSED" ':a;N;$!ba;s/\n/\\n/g' "$csr")
     # Alternative to replace the literal newline with escaped newline
     # csr_contents=$(sed 's/$/\\n/g' "$csr" | tr -d '\n')
 
