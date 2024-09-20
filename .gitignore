@@ -7,3 +7,4 @@ dist/
 *.srl
 *.key
 .env
+*.crt

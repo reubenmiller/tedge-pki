@@ -54,10 +54,26 @@ renew() {
 #
 # main
 #
-main() {
-    if expires_soon; then
-        renew
-    fi
-}
+COMMAND=check_renew
+if [ $# -gt 0 ]; then
+    COMMAND="$1"
+    shift
+fi
 
-main
+case "$COMMAND" in
+    check)
+        expires_soon
+        ;;
+    renew)
+        renew
+        ;;
+    check_renew)
+        if expires_soon; then
+            renew
+        fi
+        ;;
+    *)
+        echo "Unknown command" >&2
+        exit 1
+        ;;
+esac
